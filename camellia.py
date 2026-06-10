@@ -24,12 +24,16 @@ class Camellia:
         186,  81, 218,  73,  63,  19, 121,  35, 193,  53,  84, 135, 108,  32, 254,  26
     ]
 
-    # יצירת שאר ה-S-Boxes מתוך SBOX1 באמצעות הזזות בינאריות (קבוע לפי התקן)
+    # יצירת שאר ה-S-Boxes מתוך SBOX1
     SBOX2 = [((s << 1) & 0xFF) | (s >> 7) for s in SBOX1]
     SBOX3 = [((s << 7) & 0xFF) | (s >> 1) for s in SBOX1]
-    SBOX4 = [SBOX1[s] for s in SBOX2] # SBOX4 הוא פשוט SBOX1(SBOX2(i))
+    
+    # פתרון הבעיה: שימוש בלולאה רגילה שאינה מייצרת Scope חדש ומבודד
+    SBOX4 = []
+    for s in SBOX2:
+        SBOX4.append(SBOX1[s])
 
-    # קבועים אריתמטיים Sigma עבור יצירת מפתחות (128 ביט משתמש רק ב-SIGMA1 עד SIGMA4)
+    # קבועים אריתמטיים Sigma עבור יצירת מפתחות
     SIGMA = [
         0xA09E667F3BCC908B,
         0xB64A4A366A2D36DE,
