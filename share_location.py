@@ -1,19 +1,18 @@
 import json
-# ייבוא הקבצים מתוך תיקיית הפרויקט שלך
+# ייבוא תקין של הקבצים מתוך תיקיית הפרויקט
 import camellia
-import rsa.py as rsa
+import rsa
 import signature
 
 class ShareLocationApp:
     def __init__(self):
         print("\n[+] מאתחל מערכת שיתוף מיקום מאובטחת ומייצר מפתחות...")
-        # יצירת מפתחות אסימטריים (RSA) לצורך ההדגמה (עבור אליס ובוב)
+        # יצירת מפתחות אסימטריים על בסיס rsa.py שלך
         self.alice_public, self.alice_private = rsa.generate_keypair(61, 53)
         self.bob_public, self.bob_private = rsa.generate_keypair(67, 59)
         
-        # מפתח סימטרי קבוע ל-Camellia (באורך 16 בתים / 128 סיביות)
-        # בהתאם למפרט Camellia שתומך בבלוק ומפתח של 128 סיביות
-        self.session_key = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        # מפתח סימטרי ל-Camellia (מומר ל-bytes עבור תאימות)
+        self.session_key = bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
 
     def run_console(self):
         """ מפעיל קונסול אינטראקטיבי לקבלת מיקום, הצפנה ופענוח שלו """
@@ -45,7 +44,7 @@ class ShareLocationApp:
                     # 2. סימולציית צד א' - השולח (אליס) מצפין וחותם
                     packet = self._simulate_sender(latitude, longitude)
                     
-                    # 3. הצגת המידע המוצפן על המסך (מה שעובר ברשת)
+                    # 3. הצגת המידע המוצפן על המסך
                     self._print_encrypted_packet(packet)
                     
                     input("\n לחץ על Enter כדי להעביר את החבילה לצד השני (בוב) ולבטל את ההצפנה...\n")
@@ -65,30 +64,35 @@ class ShareLocationApp:
         # בניית מבנה הנתונים
         location_data = json.dumps({"lat": lat, "lon": lon})
         
-        # א. יצירת חתימה דיגיטלית על ה-Hash של המיקום (באמצעות המפתח הפרטי של השולח)
+        # א. יצירת חתימה דיגיטלית על המיקום (באמצעות המפתח הפרטי של השולח)
         print("[+] מחשב חתימה דיגיטלית (Signature) בעזרת המפתח הפרטי של אליס...")
         loc_signature = signature.signature_encrypt(location_data, self.alice_private)
         
-        # ב. הצפנת נתוני המיקום בעזרת מפתח סימטרי של Camellia
-        print("[+] מצפין את נתוני המיקום באמצעות אלגוריתם Camellia...")
-        encrypted_location = camellia.encrypt(self.session_key, location_data)
+        # ב. הצפנת נתוני המיקום בעזרת מפתח סימטרי של Camellia ומצב CTR
+        print("[+] מצפין את נתוני המיקום באמצעות אלגוריתם Camellia ומצב CTR...")
+        cipher = camellia.Camellia(self.session_key)
+        iv = b"MyUniqueNonce123"  # וקטור אתחול באורך 16 בתים הנדרש למצב מונה
+        
+        encrypted_location_bytes = cipher.camellia_ctr(location_data.encode('utf-8'), iv)
+        encrypted_location = encrypted_location_bytes.hex()  # המרה לטקסט הקסדצימלי לתצוגה
         
         # ג. הצפנת מפתח ה-Camellia עצמו בעזרת המפתח הציבורי של המקבל (RSA)
         print("[+] מצפין את מפתח ה-Camellia בעזרת המפתח הציבורי של בוב (RSA)...")
-        key_as_str = ",".join(map(str, self.session_key))
+        key_as_str = ",".join(map(str, list(self.session_key)))
         encrypted_session_key = rsa.encrypt(self.bob_public, key_as_str)
         
         # הרכבת חבילת המידע המלאה
         return {
             "encrypted_location": encrypted_location,
             "encrypted_key": encrypted_session_key,
-            "signature": loc_signature
+            "signature": loc_signature,
+            "iv": iv.hex()
         }
 
     def _print_encrypted_packet(self, packet):
         """ מדפיס את המידע המוצפן כפי שהוא נראה 'באוויר' """
         print("\n" + "="*20 + " החבילה המוצפנת שעוברת ברשת " + "="*20)
-        print(f"🔒 מיקום מוצפן (Camellia Ciphertext):\n   {packet['encrypted_location']}")
+        print(f"🔒 מיקום מוצפן (Camellia Ciphertext - Hex):\n   {packet['encrypted_location']}")
         print(f"🔒 מפתח סימטרי מוצפן (RSA Encrypted Key):\n   {packet['encrypted_key']}")
         print(f"🔏 חתימה דיגיטלית (Sender Signature):\n   {packet['signature']}")
         print("=" * 68)
@@ -100,11 +104,16 @@ class ShareLocationApp:
         # א. פענוח מפתח ה-Camellia בעזרת המפתח הפרטי של המקבל (RSA)
         print("[+] מפענח את מפתח ה-Camellia בעזרת המפתח הפרטי של בוב (RSA)...")
         decrypted_key_str = rsa.decrypt(self.bob_private, packet["encrypted_key"])
-        session_key = [int(x) for x in decrypted_key_str.split(",")]
+        session_key_bytes = bytes([int(x) for x in decrypted_key_str.split(",")])
         
-        # ב. ביטול הצפנת המיקום (פענוח) בעזרת מפתח ה-Camellia שחולץ
-        print("[+] מפענח ומבטל את הצפנת המיקום באמצעות Camellia...")
-        decrypted_location_json = camellia.decrypt(session_key, packet["encrypted_location"])
+        # ב. ביטול הצפנת המיקום באמצעות Camellia CTR
+        print("[+] מפענח ומבטל את הצפנת המיקום באמצעות Camellia CTR...")
+        cipher = camellia.Camellia(session_key_bytes)
+        iv_bytes = bytes.fromhex(packet["iv"])
+        ciphertext_bytes = bytes.fromhex(packet["encrypted_location"])
+        
+        decrypted_location_bytes = cipher.camellia_ctr(ciphertext_bytes, iv_bytes)
+        decrypted_location_json = decrypted_location_bytes.decode('utf-8')
         
         # ג. אימות החתימה הדיגיטלית בעזרת המפתח הציבורי של השולח
         print("[+] מאמת את זהות השולח ואת שלמות המידע בעזרת המפתח הציבורי של אליס...")
