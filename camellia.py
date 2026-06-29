@@ -1,6 +1,5 @@
 # ==========================================
 #        Camellia Cipher - CTR Mode
-#        100% Pure Python (No Imports)
 #        Implements Camellia-128 per RFC 3713
 # ==========================================
 
