@@ -1,137 +1,135 @@
+# ==========================================
+#   Private Location Sharing Service
+#   Main application + sender/receiver demo
+#
+#   Crypto suite:  Camellia-CTR | X25519 | Ed25519
+#   The "server" only relays the encrypted packet
+#   and can never read the GPS data (end-to-end).
+# ==========================================
+ 
 import json
-# ייבוא תקין של הקבצים מתוך תיקיית הפרויקט
+import os
+ 
 import camellia
-import rsa
-import signature
-
+import X25519
+import Ed25519
+import Kdf
+ 
+ 
+class User:
+    """A user with a long-term Ed25519 identity and an ephemeral X25519 keypair."""
+ 
+    def __init__(self, name: str):
+        self.name = name
+        # Long-term identity (Ed25519) - used to sign and authenticate
+        self.id_private, self.id_public = Ed25519.generate_keypair()
+        # Ephemeral key-exchange keypair (X25519) - per session
+        self.eph_private, self.eph_public = X25519.generate_keypair()
+ 
+    def sign_ephemeral(self) -> bytes:
+        """Sign our X25519 public key with our Ed25519 identity (anti-MITM)."""
+        return Ed25519.sign(self.eph_public, self.id_private)
+ 
+ 
+def establish_session_key(me: User, peer_eph_public: bytes) -> bytes:
+    """Run X25519 and derive a 16-byte Camellia key via HKDF."""
+    secret = X25519.shared_secret(me.eph_private, peer_eph_public)
+    return Kdf.derive_camellia_key(secret)
+ 
+ 
 class ShareLocationApp:
     def __init__(self):
-        print("\n[+] מאתחל מערכת שיתוף מיקום מאובטחת ומייצר מפתחות...")
-        # יצירת מפתחות אסימטריים על בסיס rsa.py שלך
-        self.alice_public, self.alice_private = rsa.generate_keypair(61, 53)
-        self.bob_public, self.bob_private = rsa.generate_keypair(67, 59)
-        
-        # מפתח סימטרי ל-Camellia (מומר ל-bytes עבור תאימות)
-        self.session_key = bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
-
+        print("\n[+] Initializing secure location sharing and generating keys...")
+        self.alice = User("Alice")
+        self.bob = User("Bob")
+ 
+        # --- Anti-MITM: each side verifies the peer's ephemeral key signature ---
+        # (each already knows the other's long-term Ed25519 identity key)
+        if not Ed25519.verify(self.bob.eph_public,
+                              self.bob.sign_ephemeral(),
+                              self.bob.id_public):
+            raise ValueError("Bob's ephemeral key signature is invalid!")
+        if not Ed25519.verify(self.alice.eph_public,
+                              self.alice.sign_ephemeral(),
+                              self.alice.id_public):
+            raise ValueError("Alice's ephemeral key signature is invalid!")
+ 
+        # --- Key agreement: both sides derive the same Camellia key ---
+        self.alice_key = establish_session_key(self.alice, self.bob.eph_public)
+        self.bob_key   = establish_session_key(self.bob, self.alice.eph_public)
+        assert self.alice_key == self.bob_key, "Key agreement failed!"
+        print("[+] Session established. Shared Camellia key derived on both sides.")
+ 
     def run_console(self):
-        """ מפעיל קונסול אינטראקטיבי לקבלת מיקום, הצפנה ופענוח שלו """
         print("=" * 60)
-        print("         מערכת סימולציית שיתוף מיקום מאובטח")
+        print("        Secure Location Sharing Simulation")
         print("=" * 60)
-        
         while True:
-            print("\n--- תפריט פעולות ---")
-            print("1. הזן מיקום חדש ושלח בצורה מאובטחת")
-            print("2. יציאה מהתוכנית")
-            
-            choice = input("בחר אפשרות (1-2): ").strip()
-            
-            if choice == '2':
-                print("[!] יוצא מהתוכנית. להתראות!")
+            print("\n--- Menu ---")
+            print("1. Enter a new location and send it securely")
+            print("2. Exit")
+            choice = input("Choose (1-2): ").strip()
+            if choice == "2":
+                print("[!] Goodbye.")
                 break
-                
-            if choice == '1':
+            if choice == "1":
                 try:
-                    # 1. קבלת קלט מהמשתמש
-                    latitude = input("הזן קו רוחב (Latitude, למשל 32.1133): ").strip()
-                    longitude = input("הזן קו אורך (Longitude, למשל 34.8044): ").strip()
-                    
-                    if not latitude or not longitude:
-                        print("[❌] שגיאה: חובה להזין ערכים!")
+                    lat = input("Latitude  (e.g. 32.1133): ").strip()
+                    lon = input("Longitude (e.g. 34.8044): ").strip()
+                    if not lat or not lon:
+                        print("[X] Both values are required.")
                         continue
-                        
-                    # 2. סימולציית צד א' - השולח (אליס) מצפין וחותם
-                    packet = self._simulate_sender(latitude, longitude)
-                    
-                    # 3. הצגת המידע המוצפן על המסך
-                    self._print_encrypted_packet(packet)
-                    
-                    input("\n לחץ על Enter כדי להעביר את החבילה לצד השני (בוב) ולבטל את ההצפנה...\n")
-                    
-                    # 4. סימולציית צד ב' - המקבל (בוב) מפענח ומאמת
-                    self._simulate_receiver(packet)
-                    
+                    packet = self._sender(lat, lon)
+                    self._print_packet(packet)
+                    input("\nPress Enter to relay through the server to Bob...\n")
+                    self._receiver(packet)
                 except Exception as e:
-                    print(f"[❌] שגיאה במהלך התהליך: {e}")
+                    print(f"[X] Error: {e}")
             else:
-                print("[❌] בחירה לא חוקית, נסה שוב.")
-
-    def _simulate_sender(self, lat, lon):
-        """ צד השולח: אריזת הנתונים, חתימה דיגיטלית והצפנה """
-        print("\n--- [צד א': השולח] מתחיל תהליך אבטחה וריפוד ---")
-        
-        # בניית מבנה הנתונים
-        location_data = json.dumps({"lat": lat, "lon": lon})
-        
-        # א. יצירת חתימה דיגיטלית על המיקום (באמצעות המפתח הפרטי של השולח)
-        print("[+] מחשב חתימה דיגיטלית (Signature) בעזרת המפתח הפרטי של אליס...")
-        loc_signature = signature.signature_encrypt(location_data, self.alice_private)
-        
-        # ב. הצפנת נתוני המיקום בעזרת מפתח סימטרי של Camellia ומצב CTR
-        print("[+] מצפין את נתוני המיקום באמצעות אלגוריתם Camellia ומצב CTR...")
-        cipher = camellia.Camellia(self.session_key)
-        iv = b"MyUniqueNonce123"  # וקטור אתחול באורך 16 בתים הנדרש למצב מונה
-        
-        encrypted_location_bytes = cipher.camellia_ctr(location_data.encode('utf-8'), iv)
-        encrypted_location = encrypted_location_bytes.hex()  # המרה לטקסט הקסדצימלי לתצוגה
-        
-        # ג. הצפנת מפתח ה-Camellia עצמו בעזרת המפתח הציבורי של המקבל (RSA)
-        print("[+] מצפין את מפתח ה-Camellia בעזרת המפתח הציבורי של בוב (RSA)...")
-        key_as_str = ",".join(map(str, list(self.session_key)))
-        encrypted_session_key = rsa.encrypt(self.bob_public, key_as_str)
-        
-        # הרכבת חבילת המידע המלאה
-        return {
-            "encrypted_location": encrypted_location,
-            "encrypted_key": encrypted_session_key,
-            "signature": loc_signature,
-            "iv": iv.hex()
-        }
-
-    def _print_encrypted_packet(self, packet):
-        """ מדפיס את המידע המוצפן כפי שהוא נראה 'באוויר' """
-        print("\n" + "="*20 + " החבילה המוצפנת שעוברת ברשת " + "="*20)
-        print(f"🔒 מיקום מוצפן (Camellia Ciphertext - Hex):\n   {packet['encrypted_location']}")
-        print(f"🔒 מפתח סימטרי מוצפן (RSA Encrypted Key):\n   {packet['encrypted_key']}")
-        print(f"🔏 חתימה דיגיטלית (Sender Signature):\n   {packet['signature']}")
-        print("=" * 68)
-
-    def _simulate_receiver(self, packet):
-        """ צד המקבל: פענוח ואימות החבילה """
-        print("--- [צד ב': המקבל] מקבל את החבילה ומתחיל ביטול הצפנה ---")
-        
-        # א. פענוח מפתח ה-Camellia בעזרת המפתח הפרטי של המקבל (RSA)
-        print("[+] מפענח את מפתח ה-Camellia בעזרת המפתח הפרטי של בוב (RSA)...")
-        decrypted_key_str = rsa.decrypt(self.bob_private, packet["encrypted_key"])
-        session_key_bytes = bytes([int(x) for x in decrypted_key_str.split(",")])
-        
-        # ב. ביטול הצפנת המיקום באמצעות Camellia CTR
-        print("[+] מפענח ומבטל את הצפנת המיקום באמצעות Camellia CTR...")
-        cipher = camellia.Camellia(session_key_bytes)
-        iv_bytes = bytes.fromhex(packet["iv"])
-        ciphertext_bytes = bytes.fromhex(packet["encrypted_location"])
-        
-        decrypted_location_bytes = cipher.camellia_ctr(ciphertext_bytes, iv_bytes)
-        decrypted_location_json = decrypted_location_bytes.decode('utf-8')
-        
-        # ג. אימות החתימה הדיגיטלית בעזרת המפתח הציבורי של השולח
-        print("[+] מאמת את זהות השולח ואת שלמות המידע בעזרת המפתח הציבורי של אליס...")
-        is_valid_signature = signature.signature_decrypt(
-            decrypted_location_json, 
-            packet["signature"], 
-            self.alice_public
-        )
-        
-        # ד. פלט סופי בהתאם לתוצאת האימות
-        if is_valid_signature:
-            print("[✓] הצלחה: החתימה אומתה! המידע אמין לחלוטין ולא שונה בדרך.")
-            location = json.loads(decrypted_location_json)
-            print(f"📍 המיקום המקורי שוחזר: קו רוחב {location['lat']}, קו אורך {location['lon']}")
-        else:
-            print("[❌] אזהרת אבטחה חמורה: אימות החתימה נכשל! המידע זוייף או שונה!")
-
-# הרצת הקונסול
+                print("[X] Invalid choice.")
+ 
+    def _sender(self, lat, lon):
+        """Alice: encrypt with Camellia-CTR, then sign the ciphertext with Ed25519."""
+        print("\n--- [Sender: Alice] securing the location ---")
+        location = json.dumps({"lat": lat, "lon": lon}).encode("utf-8")
+ 
+        print("[+] Encrypting location with Camellia-CTR...")
+        cipher = camellia.Camellia(self.alice_key)
+        iv = os.urandom(16)  # fresh nonce per message
+        ciphertext = cipher.camellia_ctr(location, iv)
+ 
+        print("[+] Signing the ciphertext with Alice's Ed25519 identity...")
+        signature = Ed25519.sign(iv + ciphertext, self.alice.id_private)
+ 
+        return {"iv": iv, "ciphertext": ciphertext, "signature": signature}
+ 
+    def _print_packet(self, packet):
+        print("\n" + "=" * 18 + " Encrypted packet on the wire " + "=" * 18)
+        print(f"  IV         : {packet['iv'].hex()}")
+        print(f"  Ciphertext : {packet['ciphertext'].hex()}")
+        print(f"  Signature  : {packet['signature'].hex()}")
+        print("  (The server sees only this. It cannot read the GPS data.)")
+        print("=" * 66)
+ 
+    def _receiver(self, packet):
+        """Bob: verify the signature first, then decrypt."""
+        print("--- [Receiver: Bob] verifying then decrypting ---")
+        iv = packet["iv"]
+        ciphertext = packet["ciphertext"]
+ 
+        print("[+] Verifying Alice's signature over the ciphertext...")
+        ok = Ed25519.verify(iv + ciphertext, packet["signature"], self.alice.id_public)
+        if not ok:
+            print("[X] SECURITY WARNING: signature invalid! Data was forged or altered.")
+            return
+ 
+        print("[+] Signature valid. Decrypting with Camellia-CTR...")
+        cipher = camellia.Camellia(self.bob_key)
+        plaintext = cipher.camellia_ctr(ciphertext, iv)
+        location = json.loads(plaintext.decode("utf-8"))
+        print(f"[OK] Location recovered: lat {location['lat']}, lon {location['lon']}")
+ 
+ 
 if __name__ == "__main__":
     app = ShareLocationApp()
     app.run_console()
