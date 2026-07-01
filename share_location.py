@@ -9,6 +9,7 @@
  
 import json
 import os
+import hashlib
  
 import camellia
 import X25519
@@ -35,6 +36,11 @@ def establish_session_key(me: User, peer_eph_public: bytes) -> bytes:
     """Run X25519 and derive a 16-byte Camellia key via HKDF."""
     secret = X25519.shared_secret(me.eph_private, peer_eph_public)
     return Kdf.derive_camellia_key(secret)
+
+
+def signed_payload_hash(iv: bytes, ciphertext: bytes) -> bytes:
+    """Return the hash that is signed for encrypted packets."""
+    return hashlib.sha256(iv + ciphertext).digest()
  
  
 class ShareLocationApp:
@@ -89,7 +95,7 @@ class ShareLocationApp:
                 print("[X] Invalid choice.")
  
     def _sender(self, lat, lon):
-        """Alice: encrypt with Camellia-CTR, then sign the ciphertext with Ed25519."""
+        """Alice: encrypt with Camellia-CTR, then sign the packet hash with Ed25519."""
         print("\n--- [Sender: Alice] securing the location ---")
         location = json.dumps({"lat": lat, "lon": lon}).encode("utf-8")
  
@@ -98,8 +104,9 @@ class ShareLocationApp:
         iv = os.urandom(16)  # fresh nonce per message
         ciphertext = cipher.camellia_ctr(location, iv)
  
-        print("[+] Signing the ciphertext with Alice's Ed25519 identity...")
-        signature = Ed25519.sign(iv + ciphertext, self.alice.id_private)
+        packet_hash = signed_payload_hash(iv, ciphertext)
+        print("[+] Signing the SHA-256 hash of the IV and ciphertext with Alice's Ed25519 identity...")
+        signature = Ed25519.sign(packet_hash, self.alice.id_private)
  
         return {"iv": iv, "ciphertext": ciphertext, "signature": signature}
  
@@ -117,8 +124,9 @@ class ShareLocationApp:
         iv = packet["iv"]
         ciphertext = packet["ciphertext"]
  
-        print("[+] Verifying Alice's signature over the ciphertext...")
-        ok = Ed25519.verify(iv + ciphertext, packet["signature"], self.alice.id_public)
+        packet_hash = signed_payload_hash(iv, ciphertext)
+        print("[+] Verifying Alice's signature over the SHA-256 hash of the IV and ciphertext...")
+        ok = Ed25519.verify(packet_hash, packet["signature"], self.alice.id_public)
         if not ok:
             print("[X] SECURITY WARNING: signature invalid! Data was forged or altered.")
             return
